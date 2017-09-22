@@ -160,6 +160,7 @@ use pocketmine\tile\ItemFrame;
 use pocketmine\tile\Spawnable;
 use pocketmine\tile\Tile;
 use pocketmine\utils\TextFormat;
+use pocketmine\utils\Utils;
 use pocketmine\utils\UUID;
 
 
@@ -1993,7 +1994,70 @@ class Player extends Human implements CommandSender, ChunkLoader, IPlayer{
 			return true;
 		}
 
-		//TODO: add JWT verification, add encryption
+		$currentKey = null;
+		$verified = false;
+		$authenticated = false;
+		$mojangKey = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE8ELkixyLcwlZryUQcu1TvPOmI2B7vX83ndnWRUaXm74wFfa5f/lwQNTfrLVHa2PmenpGI6JhIMUJaWZrjmMj90NoKNFSNBuKdm8rYiXsfaz3K36x/1U26HpG0ZxK/V1V";
+
+		$xboxUserId = "";
+
+		foreach($packet->chainData["chain"] as $jwt){
+			list($headB64, $payloadB64, $sigB64) = explode('.', $jwt);
+
+			$headers = json_decode(base64_decode(strtr($headB64, '-_', '+/'), true), true);
+
+			if($currentKey === null){ //First link, check that it is self-signed
+				$currentKey = $headers["x5u"];
+			}
+
+			$plainSignature = base64_decode(strtr($sigB64, '-_', '+/'), true);
+
+			//OpenSSL wants a DER-encoded signature, so we extract R and S from the plain signature and crudely serialize it.
+
+			assert(strlen($plainSignature) === 96);
+
+			list($rString, $sString) = str_split($plainSignature, 48);
+
+			$rString = ltrim($rString, "\x00");
+			if(ord($rString{0}) >= 128){ //Would be considered signed, pad it with an extra zero
+				$rString = "\x00" . $rString;
+			}
+
+			$sString = ltrim($sString, "\x00");
+			if(ord($sString{0}) >= 128){ //Would be considered signed, pad it with an extra zero
+				$sString = "\x00" . $sString;
+			}
+
+			//0x02 = Integer ASN.1 tag
+			$sequence = "\x02" . chr(strlen($rString)) . $rString . "\x02" . chr(strlen($sString)) . $sString;
+			//0x30 = Sequence ASN.1 tag
+			$derSignature = "\x30" . chr(strlen($sequence)) . $sequence;
+
+			$v = openssl_verify("$headB64.$payloadB64", $derSignature, "-----BEGIN PUBLIC KEY-----\n" . wordwrap($currentKey, 64, "\n", true) . "\n-----END PUBLIC KEY-----\n", OPENSSL_ALGO_SHA384);
+			if($v !== 1){
+				$verified = false;
+				break; //bad sig
+			}
+
+			$verified = true; //signatures so far are valid
+
+			if($currentKey === $mojangKey){
+				$authenticated = true; //we're signed into xbox live
+			}
+
+			$claims = json_decode(base64_decode(strtr($payloadB64, '-_', '+/'), true), true);
+			$currentKey = $claims["identityPublicKey"]; //the next link should be signed with this
+		}
+
+		if(!$verified){
+			$this->close("", "disconnect.loginFailedInfo.invalidSession", true);
+			return true;
+		}elseif(!$authenticated){
+			$this->close("", "disconnectionScreen.notAuthenticated", true);
+			return true;
+		}else{
+			$this->server->getLogger()->debug("Successfully verified that " . $this->username . " is authenticated to Xbox Live");
+		}
 
 		$this->processLogin();
 
